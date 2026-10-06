@@ -1,6 +1,6 @@
 {
   "name": "dsh-lazy-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Lazy on-demand bridge for Serena and codebase-memory MCP servers in DSH",
   "repository": {
     "type": "git",

@@ -12,8 +12,7 @@
               - start-mcp-server
               - --context
               - claude-code
-              - --project
-              - /Users/hoaiminh/Sites/localhost/tingnect
+            projectArg: --project
             cwd: /Users/hoaiminh/Sites/localhost/tingnect
           codebase-memory:
             command: /Users/hoaiminh/.local/bin/codebase-memory-mcp

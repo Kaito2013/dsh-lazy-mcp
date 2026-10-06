@@ -1,5 +1,7 @@
 import { Client, specTypeSchemas } from '@modelcontextprotocol/client'
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
+import { realpath, stat } from 'node:fs/promises'
+import path from 'node:path'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
@@ -12,6 +14,7 @@ const ServerConfig = z.object({
   args: z.array(String).default([]),
   cwd: z.string().default(''),
   env: z.dict(String).default({}),
+  projectArg: z.string().default(''),
 })
 
 export const Config = z.object({
@@ -44,9 +47,34 @@ function validateServerName(serverNames, server) {
   }
 }
 
+async function canonicalProject(requested, fallback) {
+  const candidate = requested || fallback
+  if (!candidate) throw new Error('project is required because this server has no default cwd')
+  if (!path.isAbsolute(candidate)) throw new Error(`project must be an absolute path: ${JSON.stringify(candidate)}`)
+  let canonical
+  try {
+    canonical = await realpath(candidate)
+  } catch {
+    throw new Error(`project must be an existing directory: ${JSON.stringify(candidate)}`)
+  }
+  if (!(await stat(canonical)).isDirectory()) {
+    throw new Error(`project must be an existing directory: ${JSON.stringify(candidate)}`)
+  }
+  return canonical
+}
+
+function projectSpec(spec, project) {
+  return {
+    ...spec,
+    cwd: project,
+    args: spec.projectArg ? [...spec.args, spec.projectArg, project] : [...spec.args],
+  }
+}
+
 export class LazyServer {
-  constructor(name, spec, options) {
+  constructor(name, spec, options, project = spec.cwd) {
     this.name = name
+    this.project = project
     this.spec = spec
     this.options = options
     this.status = 'stopped'
@@ -66,6 +94,7 @@ export class LazyServer {
   snapshot() {
     return {
       server: this.name,
+      project: this.project,
       status: this.status,
       pid: this.transport?.pid ?? null,
       toolsCached: this.tools?.size ?? 0,
@@ -262,21 +291,46 @@ export function apply(ctx, config) {
     connectTimeoutMs: config.connectTimeoutMs,
     requestTimeoutMs: config.requestTimeoutMs,
   }
-  const servers = new Map(serverNames.map(server => [server, new LazyServer(server, config.servers[server], common)]))
-  const getServer = server => {
+  const instances = new Map()
+  const keyOf = (server, project) => `${server}\u0000${project}`
+  const getServer = async (server, requestedProject, create = true) => {
     validateServerName(serverNames, server)
-    return servers.get(server)
+    const spec = config.servers[server]
+    const project = await canonicalProject(requestedProject, spec.cwd)
+    const key = keyOf(server, project)
+    let instance = instances.get(key)
+    if (instance === undefined && create) {
+      instance = new LazyServer(server, projectSpec(spec, project), common, project)
+      instances.set(key, instance)
+    }
+    return { instance, project }
+  }
+  const matchingInstances = async (server, requestedProject) => {
+    if (server === undefined && requestedProject === undefined) return [...instances.values()]
+    if (server === undefined) {
+      const project = await canonicalProject(requestedProject, '')
+      return [...instances.values()].filter(instance => instance.project === project)
+    }
+    validateServerName(serverNames, server)
+    if (requestedProject === undefined) {
+      return [...instances.values()].filter(instance => instance.name === server)
+    }
+    const { instance } = await getServer(server, requestedProject, false)
+    return instance === undefined ? [] : [instance]
   }
   const disposers = []
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'lazy_mcp_status',
     description: 'Show whether each configured lazy MCP server is stopped, starting, ready, stopping, or failed. This never starts a server.',
-    parameters: {},
+    parameters: {
+      server: { type: 'string', enum: serverNames, description: 'Optional server filter.' },
+      project: { type: 'string', description: 'Optional absolute project path filter. This never creates an instance.' },
+    },
     output: jsonOutput,
     isConcurrencySafe: () => true,
-    async execute() {
-      return { servers: serverNames.map(server => servers.get(server).snapshot()) }
+    async execute(args) {
+      return { servers: (await matchingInstances(args.server, args.project)).map(server => server.snapshot()) }
     },
   })))
 
@@ -285,15 +339,17 @@ export function apply(ctx, config) {
     description: 'Start one configured MCP server on demand and list its tools. Use before lazy_mcp_call_tool when the upstream tool name or argument schema is unknown.',
     parameters: {
       server: { type: 'string', required: true, enum: serverNames, description: 'Lazy MCP server to start and inspect.' },
+      project: { type: 'string', description: 'Absolute project/workspace directory; defaults to the server cwd.' },
       refresh: { type: 'boolean', description: 'Refresh tools from the server; defaults to true.' },
     },
     output: jsonOutput,
     timeoutMs: Math.max(config.connectTimeoutMs, config.requestTimeoutMs),
     async execute(args, exec) {
-      const server = getServer(args.server)
+      const { instance: server, project } = await getServer(args.server, args.project)
       const tools = await server.listTools(exec.signal, args.refresh !== false)
       return {
         server: args.server,
+        project,
         tools: tools.map(tool => ({
           name: tool.name,
           description: tool.description ?? '',
@@ -309,14 +365,16 @@ export function apply(ctx, config) {
     description: 'Start a configured MCP server on demand and call one raw MCP tool. The tool name is checked against the server-advertised list before dispatch.',
     parameters: {
       server: { type: 'string', required: true, enum: serverNames, description: 'Configured lazy MCP server.' },
+      project: { type: 'string', description: 'Absolute project/workspace directory; defaults to the server cwd.' },
       tool: { type: 'string', required: true, description: 'Raw tool name returned by lazy_mcp_list_tools.' },
       arguments: { type: 'object', required: true, additionalProperties: true, description: 'Arguments matching the upstream tool inputSchema.' },
     },
     output: jsonOutput,
     timeoutMs: Math.max(config.connectTimeoutMs, config.requestTimeoutMs),
     async execute(args, exec) {
-      const result = await getServer(args.server).callTool(args.tool, args.arguments, exec.signal)
-      return { server: args.server, tool: args.tool, result }
+      const { instance: server, project } = await getServer(args.server, args.project)
+      const result = await server.callTool(args.tool, args.arguments, exec.signal)
+      return { server: args.server, project, tool: args.tool, result }
     },
   })))
 
@@ -324,17 +382,18 @@ export function apply(ctx, config) {
     name: 'lazy_mcp_stop',
     description: 'Stop one lazy MCP server or all of them immediately. Normally servers stop automatically after the idle timeout.',
     parameters: {
-      server: { type: 'string', enum: serverNames, description: 'Server to stop; omit to stop all configured servers.' },
+      server: { type: 'string', enum: serverNames, description: 'Server to stop; omit to stop every running server.' },
+      project: { type: 'string', description: 'Absolute project path to stop. Combine with server for one exact instance.' },
     },
     output: jsonOutput,
     async execute(args) {
-      const targets = args.server === undefined ? [...servers.values()] : [getServer(args.server)]
+      const targets = await matchingInstances(args.server, args.project)
       return { results: await Promise.all(targets.map(server => server.stop())) }
     },
   })))
 
   ctx.effect(() => async () => {
     for (const dispose of disposers.splice(0)) dispose()
-    await Promise.allSettled([...servers.values()].map(server => server.dispose()))
+    await Promise.allSettled([...instances.values()].map(server => server.dispose()))
   }, 'dsh-lazy-mcp.lifecycle')
 }
