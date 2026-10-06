@@ -1,0 +1,21 @@
+- insert:
+    - id: dsh-lazy-mcp
+      name: dsh-lazy-mcp
+      config:
+        idleTimeoutMs: 300000
+        connectTimeoutMs: 15000
+        requestTimeoutMs: 180000
+        servers:
+          serena:
+            command: /Users/hoaiminh/.local/bin/serena
+            args:
+              - start-mcp-server
+              - --context
+              - claude-code
+              - --project
+              - /Users/hoaiminh/Sites/localhost/tingnect
+            cwd: /Users/hoaiminh/Sites/localhost/tingnect
+          codebase-memory:
+            command: /Users/hoaiminh/.local/bin/codebase-memory-mcp
+            args: []
+            cwd: /Users/hoaiminh/Sites/localhost/tingnect

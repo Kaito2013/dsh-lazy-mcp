@@ -1,0 +1,43 @@
+{
+  "name": "dsh-lazy-mcp",
+  "version": "1.0.0",
+  "description": "Lazy on-demand bridge for Serena and codebase-memory MCP servers in DSH",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kaito2013/dsh-lazy-mcp.git"
+  },
+  "homepage": "https://github.com/Kaito2013/dsh-lazy-mcp#readme",
+  "bugs": "https://github.com/Kaito2013/dsh-lazy-mcp/issues",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-subprocess": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "license": "MIT"
+}
